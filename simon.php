@@ -20,6 +20,18 @@ define('SIMON_VERSION', '1.0.0');
 define('SIMON_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('SIMON_PLUGIN_URL', plugin_dir_url(__FILE__));
 
+// Flush rewrite rules on activation
+register_activation_hook(__FILE__, function() {
+    $simon = Simon_Integration::get_instance();
+    $simon->register_rewrite_rules();
+    flush_rewrite_rules();
+});
+
+// Flush rewrite rules on deactivation
+register_deactivation_hook(__FILE__, function() {
+    flush_rewrite_rules();
+});
+
 /**
  * Main SIMON class
  */
@@ -56,9 +68,11 @@ class Simon_Integration {
         // Schedule cron if enabled
         add_action('init', [$this, 'schedule_cron']);
         
-        // Add rewrite rules for endpoints
-        add_action('init', [$this, 'add_rewrite_rules']);
-        add_action('template_redirect', [$this, 'handle_endpoints']);
+        // Register URL endpoints (check very early before WordPress tries to find pages)
+        add_action('plugins_loaded', [$this, 'check_url_endpoints'], 1);
+        add_action('init', [$this, 'register_rewrite_rules']);
+        add_action('init', [$this, 'flush_rewrite_rules_once'], 999);
+        add_action('template_redirect', [$this, 'handle_url_endpoints']);
         
         // WP-CLI command
         if (defined('WP_CLI') && WP_CLI) {
@@ -216,6 +230,11 @@ class Simon_Integration {
             return;
         }
 
+        if (isset($_POST['save_client'])) {
+            check_admin_referer('simon_client');
+            $this->save_client_data();
+        }
+
         if (isset($_POST['create_client'])) {
             check_admin_referer('simon_client');
             $this->create_client();
@@ -233,20 +252,73 @@ class Simon_Integration {
         $client_name = get_option('simon_client_name', '');
         $contact_name = get_option('simon_contact_name', '');
         $contact_email = get_option('simon_contact_email', '');
+        
+        // Get API response from last submission (stored in transient)
+        $last_response = get_transient('simon_client_last_response');
+        if ($last_response !== false) {
+            delete_transient('simon_client_last_response'); // Delete after displaying
+        }
         ?>
         <div class="wrap">
             <h1>SIMON Client Configuration</h1>
             <?php if ($client_id): ?>
                 <div class="notice notice-info">
                     <p><strong>Current Client ID: <?php echo esc_html($client_id); ?></strong></p>
-                    <?php 
-                    $client_auth_key = get_option('simon_client_auth_key', '');
-                    if ($client_auth_key): ?>
-                        <p><strong>Client Auth Key: <?php echo esc_html($client_auth_key); ?></strong></p>
-                        <p class="description">Keep this client auth key secure. It is required for submitting data to the SIMON API for all sites belonging to this client.</p>
-                    <?php endif; ?>
+                    <p class="description">The Client Auth Key is displayed in the form below once received from SIMON.</p>
                 </div>
             <?php endif; ?>
+            
+            <?php if ($last_response): ?>
+                <!-- API Response Display -->
+                <div class="card" style="max-width: 800px; margin-bottom: 20px;">
+                    <h2>API Response</h2>
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row">Status Code</th>
+                            <td>
+                                <?php 
+                                $status_code = $last_response['status_code'] ?? 'N/A';
+                                $status_class = ($status_code >= 200 && $status_code < 300) ? 'notice-success' : 'notice-error';
+                                ?>
+                                <span class="notice <?php echo esc_attr($status_class); ?>" style="display: inline-block; padding: 5px 10px;">
+                                    <strong><?php echo esc_html($status_code); ?></strong>
+                                </span>
+                            </td>
+                        </tr>
+                        <?php if (!empty($last_response['headers'])): ?>
+                        <tr>
+                            <th scope="row">Response Headers</th>
+                            <td>
+                                <details style="margin-top: 10px;">
+                                    <summary style="cursor: pointer; font-weight: 600; color: #0073aa; margin-bottom: 10px;">Click to view headers</summary>
+                                    <pre style="background: #f5f5f5; padding: 15px; border: 1px solid #ddd; border-radius: 3px; overflow-x: auto; max-height: 300px; overflow-y: auto;"><code><?php echo esc_html(json_encode($last_response['headers'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)); ?></code></pre>
+                                </details>
+                            </td>
+                        </tr>
+                        <?php endif; ?>
+                        <tr>
+                            <th scope="row">Response Body</th>
+                            <td>
+                                <details style="margin-top: 10px;" open>
+                                    <summary style="cursor: pointer; font-weight: 600; color: #0073aa; margin-bottom: 10px;">Click to view response</summary>
+                                    <pre style="background: #f5f5f5; padding: 15px; border: 1px solid #ddd; border-radius: 3px; overflow-x: auto; max-height: 400px; overflow-y: auto;"><code><?php echo esc_html($last_response['body_formatted']); ?></code></pre>
+                                </details>
+                            </td>
+                        </tr>
+                        <?php if (!empty($last_response['message'])): ?>
+                        <tr>
+                            <th scope="row">Message</th>
+                            <td>
+                                <div class="notice <?php echo esc_attr($last_response['message_type'] ?? 'notice-info'); ?>">
+                                    <p><?php echo esc_html($last_response['message']); ?></p>
+                                </div>
+                            </td>
+                        </tr>
+                        <?php endif; ?>
+                    </table>
+                </div>
+            <?php endif; ?>
+            
             <form method="post">
                 <?php wp_nonce_field('simon_client'); ?>
                 <table class="form-table">
@@ -280,10 +352,24 @@ class Simon_Integration {
                                    class="regular-text">
                         </td>
                     </tr>
+                    <?php if ($client_id): ?>
+                    <tr>
+                        <th scope="row">
+                            <label for="client_id">Client ID</label>
+                        </th>
+                        <td>
+                            <input type="text" id="client_id" name="client_id" 
+                                   value="<?php echo esc_attr($client_id); ?>" 
+                                   class="regular-text" readonly style="background-color: #f5f5f5; cursor: not-allowed;">
+                            <p class="description">This ID is received from SIMON after client creation/update and cannot be edited. It is automatically included in all subsequent API calls.</p>
+                        </td>
+                    </tr>
+                    <?php endif; ?>
                 </table>
-                <?php submit_button('Create/Update Client', 'primary', 'create_client'); ?>
+                <?php submit_button('Save Data', 'secondary', 'save_client', false); ?>
+                <?php submit_button('Create/Update Client', 'primary', 'create_client', false); ?>
                 <?php if ($client_id): ?>
-                    <?php submit_button('Clear Client ID', 'secondary', 'clear_client'); ?>
+                    <?php submit_button('Clear Client ID', 'delete', 'clear_client', false); ?>
                 <?php endif; ?>
             </form>
         </div>
@@ -341,8 +427,6 @@ class Simon_Integration {
 
         $site_name = get_option('simon_site_name', get_bloginfo('name'));
         $site_url = get_option('simon_site_url', home_url());
-        $external_id = get_option('simon_external_id', '');
-        $auth_token = get_option('simon_auth_token', '');
         ?>
         <div class="wrap">
             <h1>SIMON Site Configuration</h1>
@@ -381,47 +465,86 @@ class Simon_Integration {
                                    class="regular-text" required>
                         </td>
                     </tr>
+                    <?php if ($site_id): ?>
                     <tr>
                         <th scope="row">
-                            <label for="external_id">External ID</label>
+                            <label for="site_id">Site ID</label>
                         </th>
                         <td>
-                            <input type="text" id="external_id" name="external_id" 
-                                   value="<?php echo esc_attr($external_id); ?>" 
-                                   class="regular-text">
+                            <input type="text" id="site_id" name="site_id" 
+                                   value="<?php echo esc_attr($site_id); ?>" 
+                                   class="regular-text" readonly style="background-color: #f5f5f5; cursor: not-allowed;">
+                            <p class="description">This ID is received from SIMON after site creation/update and cannot be edited. It is automatically included in all API submissions.</p>
                         </td>
                     </tr>
-                    <tr>
-                        <th scope="row">
-                            <label for="auth_token">Auth Token</label>
-                        </th>
-                        <td>
-                            <input type="text" id="auth_token" name="auth_token" 
-                                   value="<?php echo esc_attr($auth_token); ?>" 
-                                   class="regular-text">
-                        </td>
-                    </tr>
+                    <?php endif; ?>
                 </table>
-                <?php submit_button('Create/Update Site', 'primary', 'create_site'); ?>
-                <?php if ($site_id): ?>
-                    <?php submit_button('Clear Site ID', 'secondary', 'clear_site'); ?>
-                    <?php submit_button('Submit Data Now', 'primary', 'submit_now'); ?>
-                <?php endif; ?>
+                <p class="submit">
+                    <?php submit_button('Create/Update Site', 'primary', 'create_site', false); ?>
+                    <?php if ($site_id): ?>
+                        <?php submit_button('Clear Site ID', 'delete', 'clear_site', false); ?>
+                        <?php submit_button('Submit Data Now', 'primary', 'submit_now', false); ?>
+                    <?php endif; ?>
+                </p>
             </form>
         </div>
         <?php
     }
 
     /**
+     * Save client data locally without submitting to API
+     */
+    private function save_client_data() {
+        if (!isset($_POST['client_name']) || empty($_POST['client_name'])) {
+            echo '<div class="notice notice-error"><p>Client Name is required.</p></div>';
+            return;
+        }
+
+        update_option('simon_client_name', sanitize_text_field($_POST['client_name']));
+        
+        if (isset($_POST['contact_name'])) {
+            update_option('simon_contact_name', sanitize_text_field($_POST['contact_name']));
+        }
+        
+        if (isset($_POST['contact_email'])) {
+            update_option('simon_contact_email', sanitize_email($_POST['contact_email']));
+        }
+
+        echo '<div class="notice notice-success"><p>Client data saved successfully! You can now submit it to the API when ready.</p></div>';
+    }
+
+    /**
      * Create client
      */
     private function create_client() {
+        $auth_key = get_option('simon_auth_key', '');
         $api_url = get_option('simon_api_url', '');
+        
+        // Use POST data if available, otherwise fall back to saved options
         $client_data = [
-            'name' => sanitize_text_field($_POST['client_name']),
-            'contact_name' => sanitize_text_field($_POST['contact_name']),
-            'contact_email' => sanitize_email($_POST['contact_email']),
+            'name' => !empty($_POST['client_name']) 
+                ? sanitize_text_field($_POST['client_name']) 
+                : get_option('simon_client_name', ''),
+            'contact_name' => !empty($_POST['contact_name']) 
+                ? sanitize_text_field($_POST['contact_name']) 
+                : get_option('simon_contact_name', ''),
+            'contact_email' => !empty($_POST['contact_email']) 
+                ? sanitize_email($_POST['contact_email']) 
+                : get_option('simon_contact_email', ''),
+            'auth_key' => $auth_key, // Add SIMON plugin auth_key to payload
         ];
+        
+        // Validate required field
+        if (empty($client_data['name'])) {
+            echo '<div class="notice notice-error"><p>Client Name is required. Please enter it in the form or save it first.</p></div>';
+            return;
+        }
+        
+        // Validate auth_key
+        if (empty($auth_key)) {
+            echo '<div class="notice notice-error"><p>Auth Key is required. Please configure it in <a href="' . admin_url('options-general.php?page=simon-settings') . '">SIMON Settings</a>.</p></div>';
+            return;
+        }
 
         $response = wp_remote_post(rtrim($api_url, '/') . '/api/clients', [
             'body' => json_encode($client_data),
@@ -432,18 +555,50 @@ class Simon_Integration {
             'timeout' => 30,
         ]);
 
+        // Prepare response data for display
+        $response_data = [
+            'status_code' => null,
+            'headers' => [],
+            'body' => null,
+            'body_formatted' => '',
+            'message' => '',
+            'message_type' => 'notice-info',
+        ];
+
         if (is_wp_error($response)) {
-            echo '<div class="notice notice-error"><p>Error: ' . esc_html($response->get_error_message()) . '</p></div>';
+            $response_data['status_code'] = 'Error';
+            $response_data['message'] = 'Error: ' . $response->get_error_message();
+            $response_data['message_type'] = 'notice-error';
+            $response_data['body_formatted'] = json_encode(['error' => $response->get_error_message()], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            set_transient('simon_client_last_response', $response_data, 60); // Store for 60 seconds
             return;
         }
 
         $code = wp_remote_retrieve_response_code($response);
-        if ($code === 201 || $code === 409) {
-            $body = json_decode(wp_remote_retrieve_body($response), true);
-            $client_id = $body['client_id'] ?? null;
-            $client_auth_key = $body['auth_key'] ?? null;
+        $response_headers = wp_remote_retrieve_headers($response);
+        $body = wp_remote_retrieve_body($response);
+        
+        // Parse response body
+        $body_decoded = json_decode($body, true);
+        if (json_last_error() === JSON_ERROR_NONE) {
+            $response_data['body'] = $body_decoded;
+            $response_data['body_formatted'] = json_encode($body_decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        } else {
+            $response_data['body'] = $body;
+            $response_data['body_formatted'] = esc_html($body);
+        }
+        
+        $response_data['status_code'] = $code;
+        $response_data['headers'] = $response_headers->getAll();
+
+        // Treat 200-299 as success (200 = OK, 201 = Created, 409 = Conflict/Already exists)
+        if ($code >= 200 && $code < 300) {
+            // Extract client_id from response (check all possible field names)
+            $client_id = $body_decoded['client_id'] ?? $body_decoded['id'] ?? $body_decoded['clientId'] ?? null;
+            $client_auth_key = $body_decoded['auth_key'] ?? $body_decoded['authKey'] ?? null;
 
             if ($client_id) {
+                // Store client_id - this will be used in all subsequent API calls (site creation, data submission)
                 update_option('simon_client_id', $client_id);
                 update_option('simon_client_name', $client_data['name']);
                 update_option('simon_contact_name', $client_data['contact_name']);
@@ -451,11 +606,28 @@ class Simon_Integration {
                 if ($client_auth_key) {
                     update_option('simon_client_auth_key', $client_auth_key);
                 }
-                echo '<div class="notice notice-success"><p>Client created/updated successfully! Client ID: ' . esc_html($client_id) . '</p></div>';
+                $response_data['message'] = 'Client created/updated successfully! Client ID: ' . esc_html($client_id) . ' has been saved and will be included in all subsequent API calls.';
+                if ($client_auth_key) {
+                    $response_data['message'] .= ' Client Auth Key has been saved.';
+                }
+                $response_data['message_type'] = 'notice-success';
+            } else {
+                $response_data['message'] = 'Response received but client_id not found in response. Checked fields: client_id, id, clientId. Response body saved for review.';
+                $response_data['message_type'] = 'notice-warning';
             }
         } else {
-            echo '<div class="notice notice-error"><p>Failed to create client. Status: ' . esc_html($code) . '</p></div>';
+            $error_msg = 'Failed to create/update client. Status: ' . esc_html($code);
+            if (isset($body_decoded['message'])) {
+                $error_msg .= ' - ' . esc_html($body_decoded['message']);
+            } elseif (isset($body_decoded['error'])) {
+                $error_msg .= ' - ' . esc_html($body_decoded['error']);
+            }
+            $response_data['message'] = $error_msg;
+            $response_data['message_type'] = 'notice-error';
         }
+        
+        // Store response for display (will be shown immediately)
+        set_transient('simon_client_last_response', $response_data, 60); // Store for 60 seconds
     }
 
     /**
@@ -464,15 +636,28 @@ class Simon_Integration {
     private function create_site() {
         $auth_key = get_option('simon_auth_key', '');
         $api_url = get_option('simon_api_url', '');
+        
+        // Get client_id from stored options (set after client creation/update)
         $client_id = get_option('simon_client_id', '');
+        
+        if (empty($client_id)) {
+            echo '<div class="notice notice-error"><p>Client ID is required. Please create/update a client first in <a href="' . admin_url('tools.php?page=simon-client') . '">SIMON Client</a> configuration.</p></div>';
+            return;
+        }
+        
         $site_data = [
             'client_id' => (int) $client_id,
             'cms' => 'wordpress',
             'name' => sanitize_text_field($_POST['site_name']),
             'url' => esc_url_raw($_POST['site_url']),
-            'external_id' => sanitize_text_field($_POST['external_id']),
-            'auth_token' => sanitize_text_field($_POST['auth_token']),
+            'auth_key' => $auth_key, // Add SIMON plugin auth_key to payload
         ];
+        
+        // Validate auth_key
+        if (empty($auth_key)) {
+            echo '<div class="notice notice-error"><p>Auth Key is required. Please configure it in <a href="' . admin_url('options-general.php?page=simon-settings') . '">SIMON Settings</a>.</p></div>';
+            return;
+        }
 
         $response = wp_remote_post(rtrim($api_url, '/') . '/api/sites', [
             'body' => json_encode($site_data),
@@ -498,8 +683,6 @@ class Simon_Integration {
                 update_option('simon_site_id', $site_id);
                 update_option('simon_site_name', $site_data['name']);
                 update_option('simon_site_url', $site_data['url']);
-                update_option('simon_external_id', $site_data['external_id']);
-                update_option('simon_auth_token', $site_data['auth_token']);
                 echo '<div class="notice notice-success"><p>Site created/updated successfully! Site ID: ' . esc_html($site_id) . '</p></div>';
             }
         } else {
@@ -542,9 +725,35 @@ class Simon_Integration {
      */
     private function get_core_status($version) {
         $update_core = get_site_transient('update_core');
-        if (isset($update_core->updates) && !empty($update_core->updates)) {
-            return 'outdated';
+        
+        // If no update data available, assume up-to-date
+        if (!$update_core || !isset($update_core->updates) || empty($update_core->updates)) {
+            return 'up-to-date';
         }
+        
+        // Check updates to determine if a newer version is available
+        foreach ($update_core->updates as $update) {
+            if (!isset($update->response)) {
+                continue;
+            }
+            
+            // If response is 'latest', the current version is up-to-date
+            if ($update->response === 'latest') {
+                return 'up-to-date';
+            }
+            
+            // If response is 'upgrade', there's a newer version available
+            if ($update->response === 'upgrade') {
+                // Double-check by comparing versions if available
+                if (isset($update->current) && version_compare($update->current, $version, '>')) {
+                    return 'outdated';
+                }
+                // If no version info but response is 'upgrade', mark as outdated
+                return 'outdated';
+            }
+        }
+        
+        // Default to up-to-date if we can't determine otherwise
         return 'up-to-date';
     }
 
@@ -665,6 +874,18 @@ class Simon_Integration {
         }
 
         $data = $this->collect_site_data();
+        
+        // Get SIMON plugin auth_key
+        $auth_key = get_option('simon_auth_key', '');
+        
+        // Get client auth_key from options (auth_key is now associated with client, not site)
+        $client_auth_key = get_option('simon_client_auth_key', '');
+        
+        if (empty($client_auth_key)) {
+            error_log('SIMON API error: client auth_key not configured. Please create/update the client to get a client auth_key.');
+            return false;
+        }
+        
         $payload = [
             'client_id' => (int) $client_id,
             'site_id' => (int) $site_id,
@@ -673,15 +894,8 @@ class Simon_Integration {
             'environment' => $data['environment'],
             'extensions' => $data['extensions'],
             'themes' => $data['themes'],
+            'auth_key' => $auth_key, // Add SIMON plugin auth_key to payload
         ];
-
-        // Get client auth_key from options (auth_key is now associated with client, not site)
-        $client_auth_key = get_option('simon_client_auth_key', '');
-        
-        if (empty($client_auth_key)) {
-            error_log('SIMON API error: client auth_key not configured. Please create/update the client to get a client auth_key.');
-            return false;
-        }
         
         $response = wp_remote_post(rtrim($api_url, '/') . '/api/intake', [
             'body' => json_encode($payload),
@@ -781,6 +995,332 @@ class Simon_Integration {
     }
 
     /**
+     * Register rewrite rules for SIMON endpoints
+     */
+    public function register_rewrite_rules() {
+        add_rewrite_rule('^simon/heartbeat/?$', 'index.php?simon_action=heartbeat', 'top');
+        add_rewrite_rule('^simon/cache-clear/?$', 'index.php?simon_action=cache-clear', 'top');
+        add_rewrite_rule('^simon/cron/?$', 'index.php?simon_action=cron', 'top');
+        add_rewrite_tag('%simon_action%', '([^&]+)');
+    }
+
+    /**
+     * Flush rewrite rules (call after registering rules)
+     */
+    public function flush_rewrite_rules_once() {
+        if (get_option('simon_rewrite_rules_flushed') !== '1') {
+            flush_rewrite_rules(false);
+            update_option('simon_rewrite_rules_flushed', '1');
+        }
+    }
+
+    /**
+     * Check URL endpoints very early (before WordPress loads)
+     */
+    public function check_url_endpoints() {
+        $this->check_and_handle_endpoint();
+    }
+
+    /**
+     * Handle URL endpoints (fallback check)
+     */
+    public function handle_url_endpoints() {
+        $action = get_query_var('simon_action');
+        
+        if ($action) {
+            $this->process_endpoint($action);
+            return;
+        }
+        
+        // Fallback: Check REQUEST_URI directly
+        $this->check_and_handle_endpoint();
+    }
+
+    /**
+     * Check REQUEST_URI and handle endpoint if matched
+     */
+    private function check_and_handle_endpoint() {
+        // Check if already processed to avoid double processing
+        if (defined('SIMON_ENDPOINT_PROCESSED')) {
+            return;
+        }
+        
+        $request_uri = isset($_SERVER['REQUEST_URI']) ? sanitize_text_field(wp_unslash($_SERVER['REQUEST_URI'])) : '';
+        
+        if (empty($request_uri)) {
+            return;
+        }
+        
+        // Remove query string and home URL path for matching
+        $parsed = parse_url($request_uri);
+        $path = isset($parsed['path']) ? rtrim($parsed['path'], '/') : '';
+        
+        // Also check raw REQUEST_URI for DDEV subdirectory setups
+        if (empty($path)) {
+            $path = strtok($request_uri, '?');
+            $path = rtrim($path, '/');
+        }
+        
+        // Debug: Log the path being checked (can remove later)
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log('SIMON Plugin: Checking path: ' . $path);
+        }
+        
+        // Check if request is for SIMON endpoints (be flexible with path matching)
+        $action = null;
+        if (preg_match('#(^|/)simon/heartbeat/?$#i', $path)) {
+            $action = 'heartbeat';
+        } elseif (preg_match('#(^|/)simon/cache-clear/?$#i', $path)) {
+            $action = 'cache-clear';
+        } elseif (preg_match('#(^|/)simon/cron/?$#i', $path)) {
+            $action = 'cron';
+        }
+        
+        if ($action) {
+            define('SIMON_ENDPOINT_PROCESSED', true);
+            $this->process_endpoint($action);
+        }
+    }
+
+    /**
+     * Process the endpoint action
+     */
+    private function process_endpoint($action) {
+        // Heartbeat endpoint doesn't require authentication
+        if ($action === 'heartbeat') {
+            $this->handle_heartbeat();
+            exit;
+        }
+
+        // Get and validate parameters for other endpoints
+        $client_id = isset($_GET['client_id']) ? sanitize_text_field($_GET['client_id']) : '';
+        $site_id = isset($_GET['site_id']) ? sanitize_text_field($_GET['site_id']) : '';
+
+        // Validate client_id and site_id match stored values
+        $stored_client_id = get_option('simon_client_id', '');
+        $stored_site_id = get_option('simon_site_id', '');
+
+        if (empty($client_id) || empty($site_id)) {
+            $this->send_json_response([
+                'success' => false,
+                'error' => 'Missing required parameters: client_id and site_id are required.',
+            ], 400);
+            exit;
+        }
+
+        if ($client_id !== $stored_client_id || $site_id !== $stored_site_id) {
+            $this->send_json_response([
+                'success' => false,
+                'error' => 'Invalid client_id or site_id. Parameters do not match stored values.',
+            ], 403);
+            exit;
+        }
+
+        // Handle different actions
+        switch ($action) {
+            case 'cache-clear':
+                $this->handle_cache_clear();
+                break;
+            case 'cron':
+                $this->handle_cron_execution();
+                break;
+            default:
+                $this->send_json_response([
+                    'success' => false,
+                    'error' => 'Unknown action.',
+                ], 404);
+                exit;
+        }
+        
+        // Exit to prevent WordPress from loading a template
+        exit;
+    }
+
+    /**
+     * Handle heartbeat endpoint
+     * Used for availability monitoring and early warning detection
+     */
+    private function handle_heartbeat() {
+        $status = [
+            'status' => 'healthy',
+            'timestamp' => current_time('mysql'),
+            'unix_timestamp' => time(),
+            'checks' => [],
+        ];
+        
+        $all_healthy = true;
+        
+        // Check 1: WordPress core functions
+        $status['checks']['wordpress'] = function_exists('get_bloginfo') && function_exists('get_option');
+        if (!$status['checks']['wordpress']) {
+            $all_healthy = false;
+        }
+        
+        // Check 2: Database connectivity
+        global $wpdb;
+        $db_check = false;
+        if ($wpdb) {
+            $db_result = $wpdb->get_var("SELECT 1");
+            $db_check = ($db_result === '1');
+        }
+        $status['checks']['database'] = $db_check;
+        if (!$db_check) {
+            $all_healthy = false;
+        }
+        
+        // Check 3: Object cache (if available)
+        $cache_check = function_exists('wp_cache_get');
+        $status['checks']['cache'] = $cache_check;
+        // Cache is optional, so we don't fail if it's not available
+        
+        // Check 4: Filesystem access
+        $filesystem_check = false;
+        if (function_exists('WP_Filesystem')) {
+            global $wp_filesystem;
+            if (!$wp_filesystem) {
+                require_once ABSPATH . 'wp-admin/includes/file.php';
+                WP_Filesystem();
+            }
+            $filesystem_check = is_object($wp_filesystem);
+        } else {
+            // Fallback: check if uploads directory exists
+            $upload_dir = wp_upload_dir();
+            $filesystem_check = $upload_dir && !empty($upload_dir['basedir']);
+        }
+        $status['checks']['filesystem'] = $filesystem_check;
+        if (!$filesystem_check) {
+            $all_healthy = false;
+        }
+        
+        // Check 5: Memory usage (warning if very high)
+        $memory_usage = function_exists('memory_get_usage') ? memory_get_usage(true) : 0;
+        $memory_limit = ini_get('memory_limit');
+        $status['checks']['memory'] = [
+            'usage' => $memory_usage,
+            'limit' => $memory_limit,
+            'healthy' => true, // We'll calculate this
+        ];
+        
+        // Calculate memory percentage if possible
+        if ($memory_limit && $memory_usage) {
+            $limit_bytes = $this->convert_memory_to_bytes($memory_limit);
+            if ($limit_bytes > 0) {
+                $memory_percent = ($memory_usage / $limit_bytes) * 100;
+                $status['checks']['memory']['percent'] = round($memory_percent, 2);
+                // Mark as unhealthy if over 90% memory usage
+                if ($memory_percent > 90) {
+                    $status['checks']['memory']['healthy'] = false;
+                    $all_healthy = false;
+                }
+            }
+        }
+        
+        // Check 6: PHP version and critical extensions
+        $status['checks']['php'] = [
+            'version' => PHP_VERSION,
+            'healthy' => version_compare(PHP_VERSION, '7.4', '>='),
+        ];
+        if (!$status['checks']['php']['healthy']) {
+            $all_healthy = false;
+        }
+        
+        // Determine overall status
+        if (!$all_healthy) {
+            $status['status'] = 'degraded';
+        }
+        
+        // Add SIMON-specific info if configured
+        $client_id = get_option('simon_client_id', '');
+        $site_id = get_option('simon_site_id', '');
+        if ($client_id && $site_id) {
+            $status['simon'] = [
+                'client_id' => $client_id,
+                'site_id' => $site_id,
+            ];
+        }
+        
+        // Return appropriate HTTP status code
+        $http_status = $all_healthy ? 200 : 503; // 503 Service Unavailable if degraded
+        
+        $this->send_json_response($status, $http_status);
+    }
+    
+    /**
+     * Convert memory limit string to bytes
+     */
+    private function convert_memory_to_bytes($memory) {
+        $memory = trim($memory);
+        $last = strtolower($memory[strlen($memory) - 1]);
+        $value = (int) $memory;
+        
+        switch ($last) {
+            case 'g':
+                $value *= 1024;
+            case 'm':
+                $value *= 1024;
+            case 'k':
+                $value *= 1024;
+        }
+        
+        return $value;
+    }
+
+    /**
+     * Handle cache clear endpoint
+     */
+    private function handle_cache_clear() {
+        // Clear WordPress object cache
+        wp_cache_flush();
+
+        // Clear all transients
+        global $wpdb;
+        $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_%'");
+        $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_site_transient_%'");
+
+        // Clear SIMON-specific transients if any
+        delete_transient('simon_client_last_response');
+
+        $this->send_json_response([
+            'success' => true,
+            'message' => 'Cache cleared successfully.',
+            'timestamp' => current_time('mysql'),
+        ]);
+        exit;
+    }
+
+    /**
+     * Handle cron execution endpoint
+     */
+    private function handle_cron_execution() {
+        // Execute the submit_data function
+        $result = $this->submit_data();
+
+        if ($result) {
+            $this->send_json_response([
+                'success' => true,
+                'message' => 'Cron executed successfully. Site data submitted to SIMON.',
+                'timestamp' => current_time('mysql'),
+            ]);
+        } else {
+            $this->send_json_response([
+                'success' => false,
+                'error' => 'Failed to execute cron. Check logs for details.',
+                'timestamp' => current_time('mysql'),
+            ], 500);
+        }
+        exit;
+    }
+
+    /**
+     * Send JSON response
+     */
+    private function send_json_response($data, $status_code = 200) {
+        status_header($status_code);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    }
+
+    /**
      * WP-CLI command
      */
     public function wpcli_submit($args, $assoc_args) {
@@ -813,40 +1353,6 @@ class Simon_Integration {
         }
     }
 }
-
-/**
- * Register query vars for endpoints
- */
-add_filter('query_vars', function($vars) {
-    $vars[] = 'simon_endpoint';
-    return $vars;
-});
-
-/**
- * Flush rewrite rules on activation
- */
-register_activation_hook(__FILE__, function() {
-    $instance = Simon_Integration::get_instance();
-    $instance->add_rewrite_rules();
-    flush_rewrite_rules();
-});
-
-/**
- * Register query vars for endpoints
- */
-add_filter('query_vars', function($vars) {
-    $vars[] = 'simon_endpoint';
-    return $vars;
-});
-
-/**
- * Flush rewrite rules on activation
- */
-register_activation_hook(__FILE__, function() {
-    $instance = Simon_Integration::get_instance();
-    $instance->add_rewrite_rules();
-    flush_rewrite_rules();
-});
 
 // Initialize plugin
 Simon_Integration::get_instance();
