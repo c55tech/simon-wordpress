@@ -127,6 +127,7 @@ class Simon_Integration {
         register_setting('simon_settings', 'simon_external_id');
         register_setting('simon_settings', 'simon_auth_token');
         register_setting('simon_settings', 'simon_client_auth_key');
+        register_setting('simon_settings', 'simon_slack_webhook');
     }
 
     /**
@@ -427,6 +428,7 @@ class Simon_Integration {
 
         $site_name = get_option('simon_site_name', get_bloginfo('name'));
         $site_url = get_option('simon_site_url', home_url());
+        $slack_webhook = get_option('simon_slack_webhook', '');
         ?>
         <div class="wrap">
             <h1>SIMON Site Configuration</h1>
@@ -463,6 +465,17 @@ class Simon_Integration {
                             <input type="url" id="site_url" name="site_url" 
                                    value="<?php echo esc_attr($site_url); ?>" 
                                    class="regular-text" required>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="slack_webhook">Slack Webhook URL</label>
+                        </th>
+                        <td>
+                            <input type="url" id="slack_webhook" name="slack_webhook" 
+                                   value="<?php echo esc_attr($slack_webhook); ?>" 
+                                   class="regular-text">
+                            <p class="description">Optional: Slack webhook URL to receive site-specific notifications</p>
                         </td>
                     </tr>
                     <?php if ($site_id): ?>
@@ -651,6 +664,7 @@ class Simon_Integration {
             'name' => sanitize_text_field($_POST['site_name']),
             'url' => esc_url_raw($_POST['site_url']),
             'auth_key' => $auth_key, // Add SIMON plugin auth_key to payload
+            'slack_webhook' => !empty($_POST['slack_webhook']) ? esc_url_raw($_POST['slack_webhook']) : '',
         ];
         
         // Validate auth_key
@@ -683,6 +697,9 @@ class Simon_Integration {
                 update_option('simon_site_id', $site_id);
                 update_option('simon_site_name', $site_data['name']);
                 update_option('simon_site_url', $site_data['url']);
+                if (!empty($site_data['slack_webhook'])) {
+                    update_option('simon_slack_webhook', $site_data['slack_webhook']);
+                }
                 echo '<div class="notice notice-success"><p>Site created/updated successfully! Site ID: ' . esc_html($site_id) . '</p></div>';
             }
         } else {
