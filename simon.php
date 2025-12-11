@@ -121,6 +121,7 @@ class Simon_Integration {
         register_setting('simon_settings', 'simon_client_name');
         register_setting('simon_settings', 'simon_contact_name');
         register_setting('simon_settings', 'simon_contact_email');
+        register_setting('simon_settings', 'simon_client_slack_webhook');
         register_setting('simon_settings', 'simon_site_id');
         register_setting('simon_settings', 'simon_site_name');
         register_setting('simon_settings', 'simon_site_url');
@@ -247,12 +248,14 @@ class Simon_Integration {
             delete_option('simon_client_name');
             delete_option('simon_contact_name');
             delete_option('simon_contact_email');
+            delete_option('simon_client_slack_webhook');
             echo '<div class="notice notice-success"><p>Client ID cleared!</p></div>';
         }
 
         $client_name = get_option('simon_client_name', '');
         $contact_name = get_option('simon_contact_name', '');
         $contact_email = get_option('simon_contact_email', '');
+        $slack_webhook = get_option('simon_client_slack_webhook', '');
         
         // Get API response from last submission (stored in transient)
         $last_response = get_transient('simon_client_last_response');
@@ -351,6 +354,17 @@ class Simon_Integration {
                             <input type="email" id="contact_email" name="contact_email" 
                                    value="<?php echo esc_attr($contact_email); ?>" 
                                    class="regular-text">
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="slack_webhook">Slack Webhook URL</label>
+                        </th>
+                        <td>
+                            <input type="url" id="slack_webhook" name="slack_webhook" 
+                                   value="<?php echo esc_attr($slack_webhook); ?>" 
+                                   class="regular-text">
+                            <p class="description">Optional: Slack webhook URL to receive all notifications for this client. All notifications for this client's sites will be sent to this webhook.</p>
                         </td>
                     </tr>
                     <?php if ($client_id): ?>
@@ -522,6 +536,10 @@ class Simon_Integration {
         if (isset($_POST['contact_email'])) {
             update_option('simon_contact_email', sanitize_email($_POST['contact_email']));
         }
+        
+        if (isset($_POST['slack_webhook'])) {
+            update_option('simon_client_slack_webhook', esc_url_raw($_POST['slack_webhook']));
+        }
 
         echo '<div class="notice notice-success"><p>Client data saved successfully! You can now submit it to the API when ready.</p></div>';
     }
@@ -544,6 +562,9 @@ class Simon_Integration {
             'contact_email' => !empty($_POST['contact_email']) 
                 ? sanitize_email($_POST['contact_email']) 
                 : get_option('simon_contact_email', ''),
+            'slack_webhook' => !empty($_POST['slack_webhook']) 
+                ? esc_url_raw($_POST['slack_webhook']) 
+                : get_option('simon_client_slack_webhook', ''),
             'auth_key' => $auth_key, // Add SIMON plugin auth_key to payload
         ];
         
