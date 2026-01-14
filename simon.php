@@ -755,6 +755,18 @@ class Simon_Integration {
         // Themes
         $data['themes'] = $this->get_themes();
 
+        // System metrics (new in v2.0.0.0)
+        $data['system_metrics'] = $this->get_system_metrics();
+
+        // Packages (new in v2.0.0.0)
+        $data['packages'] = $this->get_packages();
+
+        // Processes (new in v2.0.0.0)
+        $data['processes'] = $this->get_processes();
+
+        // Configuration (new in v2.0.0.0)
+        $data['configuration'] = $this->get_configuration();
+
         return $data;
     }
 
@@ -900,6 +912,231 @@ class Simon_Integration {
     }
 
     /**
+     * Get system metrics (new in v2.0.0.0)
+     */
+    private function get_system_metrics() {
+        $metrics = [];
+
+        // Disk metrics
+        $upload_dir = wp_upload_dir();
+        $upload_path = $upload_dir['basedir'];
+        $disk_total = disk_total_space($upload_path);
+        $disk_free = disk_free_space($upload_path);
+        
+        if ($disk_total !== false && $disk_free !== false) {
+            $disk_used = $disk_total - $disk_free;
+            $disk_usage_percent = ($disk_total > 0) ? (($disk_used / $disk_total) * 100) : 0;
+            
+            $metrics['disk'] = [
+                'total_gb' => round($disk_total / (1024 * 1024 * 1024), 2),
+                'used_gb' => round($disk_used / (1024 * 1024 * 1024), 2),
+                'available_gb' => round($disk_free / (1024 * 1024 * 1024), 2),
+                'usage_percent' => round($disk_usage_percent, 2),
+            ];
+        }
+
+        // Memory metrics (PHP process)
+        $memory_usage = memory_get_usage(true);
+        $memory_peak = memory_get_peak_usage(true);
+        $memory_limit = ini_get('memory_limit');
+        $memory_limit_bytes = $this->convert_to_bytes($memory_limit);
+        
+        if ($memory_limit_bytes > 0) {
+            $memory_usage_percent = ($memory_usage / $memory_limit_bytes) * 100;
+            
+            $metrics['memory'] = [
+                'used_mb' => round($memory_usage / (1024 * 1024), 2),
+                'peak_mb' => round($memory_peak / (1024 * 1024), 2),
+                'limit_mb' => round($memory_limit_bytes / (1024 * 1024), 2),
+                'usage_percent' => round($memory_usage_percent, 2),
+            ];
+        }
+
+        // CPU metrics (load average)
+        if (function_exists('sys_getloadavg')) {
+            $load_avg = sys_getloadavg();
+            if ($load_avg !== false) {
+                $metrics['cpu'] = [
+                    'load_average' => [
+                        round($load_avg[0], 2), // 1 minute
+                        round($load_avg[1], 2), // 5 minutes
+                        round($load_avg[2], 2), // 15 minutes
+                    ],
+                ];
+            }
+        }
+
+        // Try to get CPU cores
+        if (function_exists('exec')) {
+            $cores = @exec('nproc 2>/dev/null');
+            if ($cores && is_numeric($cores)) {
+                if (!isset($metrics['cpu'])) {
+                    $metrics['cpu'] = [];
+                }
+                $metrics['cpu']['cores'] = (int) $cores;
+            }
+        }
+
+        return !empty($metrics) ? $metrics : null;
+    }
+
+    /**
+     * Convert memory limit string to bytes
+     */
+    private function convert_to_bytes($value) {
+        $value = trim($value);
+        $last = strtolower($value[strlen($value) - 1]);
+        $value = (int) $value;
+        
+        switch ($last) {
+            case 'g':
+                $value *= 1024;
+            case 'm':
+                $value *= 1024;
+            case 'k':
+                $value *= 1024;
+        }
+        
+        return $value;
+    }
+
+    /**
+     * Get packages (Composer packages if available) (new in v2.0.0.0)
+     */
+    private function get_packages() {
+        $packages = [];
+        
+        // Check for composer.lock file
+        $composer_lock = ABSPATH . 'composer.lock';
+        if (file_exists($composer_lock)) {
+            $composer_data = json_decode(file_get_contents($composer_lock), true);
+            
+            if (isset($composer_data['packages']) && is_array($composer_data['packages'])) {
+                foreach ($composer_data['packages'] as $package) {
+                    if (isset($package['name']) && isset($package['version'])) {
+                        $packages[] = [
+                            'manager' => 'composer',
+                            'name' => $package['name'],
+                            'version' => ltrim($package['version'], 'v'), // Remove 'v' prefix if present
+                        ];
+                    }
+                }
+            }
+        }
+        
+        // Check for package.json (npm packages) if in WordPress root
+        $package_json = ABSPATH . 'package.json';
+        if (file_exists($package_json)) {
+            $npm_data = json_decode(file_get_contents($package_json), true);
+            
+            if (isset($npm_data['dependencies']) && is_array($npm_data['dependencies'])) {
+                foreach ($npm_data['dependencies'] as $name => $version) {
+                    $packages[] = [
+                        'manager' => 'npm',
+                        'name' => $name,
+                        'version' => ltrim($version, '^~'), // Remove version prefixes
+                    ];
+                }
+            }
+        }
+        
+        return !empty($packages) ? $packages : [];
+    }
+
+    /**
+     * Get processes (PHP-related processes) (new in v2.0.0.0)
+     */
+    private function get_processes() {
+        $processes = [];
+        
+        // Get current PHP process info
+        $processes[] = [
+            'name' => 'php',
+            'pid' => getmypid(),
+            'memory_mb' => round(memory_get_usage(true) / (1024 * 1024), 2),
+        ];
+        
+        // Try to get PHP-FPM processes (if accessible)
+        if (function_exists('exec')) {
+            $php_processes = @exec('ps aux | grep -E "php-fpm|php-cgi" | grep -v grep 2>/dev/null', $output);
+            if (!empty($output) && is_array($output)) {
+                foreach ($output as $line) {
+                    if (preg_match('/\s+(\d+)\s+/', $line, $matches)) {
+                        $pid = (int) $matches[1];
+                        if ($pid !== getmypid()) { // Don't duplicate current process
+                            $processes[] = [
+                                'name' => 'php-fpm',
+                                'pid' => $pid,
+                                'status' => 'running',
+                            ];
+                        }
+                    }
+                }
+            }
+        }
+        
+        return !empty($processes) ? $processes : [];
+    }
+
+    /**
+     * Get configuration (environment variables and config file metadata) (new in v2.0.0.0)
+     */
+    private function get_configuration() {
+        $config = [];
+        
+        // Environment variables (non-sensitive PHP settings)
+        $env_vars = [];
+        $safe_vars = ['PHP_VERSION', 'SERVER_SOFTWARE', 'DOCUMENT_ROOT', 'SCRIPT_FILENAME'];
+        
+        foreach ($safe_vars as $var) {
+            $value = getenv($var);
+            if ($value !== false) {
+                $env_vars[$var] = $value;
+            }
+        }
+        
+        // Add some PHP ini settings (non-sensitive)
+        $env_vars['PHP_MEMORY_LIMIT'] = ini_get('memory_limit');
+        $env_vars['PHP_MAX_EXECUTION_TIME'] = ini_get('max_execution_time');
+        $env_vars['PHP_UPLOAD_MAX_FILESIZE'] = ini_get('upload_max_filesize');
+        
+        if (!empty($env_vars)) {
+            $config['environment_variables'] = $env_vars;
+        }
+        
+        // Config file metadata
+        $config_files = [];
+        
+        // wp-config.php metadata
+        $wp_config = ABSPATH . 'wp-config.php';
+        if (file_exists($wp_config)) {
+            $config_files[] = [
+                'path' => 'wp-config.php',
+                'checksum' => md5_file($wp_config),
+                'last_modified' => date('c', filemtime($wp_config)),
+                'is_sensitive' => true, // wp-config.php contains sensitive data
+            ];
+        }
+        
+        // .htaccess metadata (if exists)
+        $htaccess = ABSPATH . '.htaccess';
+        if (file_exists($htaccess)) {
+            $config_files[] = [
+                'path' => '.htaccess',
+                'checksum' => md5_file($htaccess),
+                'last_modified' => date('c', filemtime($htaccess)),
+                'is_sensitive' => false,
+            ];
+        }
+        
+        if (!empty($config_files)) {
+            $config['config_files'] = $config_files;
+        }
+        
+        return !empty($config) ? $config : null;
+    }
+
+    /**
      * Submit data to SIMON
      */
     public function submit_data() {
@@ -934,6 +1171,20 @@ class Simon_Integration {
             'themes' => $data['themes'],
             'auth_key' => $auth_key, // Add SIMON plugin auth_key to payload
         ];
+        
+        // Add new v2.0.0.0 fields if available
+        if (isset($data['system_metrics']) && !empty($data['system_metrics'])) {
+            $payload['system_metrics'] = $data['system_metrics'];
+        }
+        if (isset($data['packages']) && !empty($data['packages'])) {
+            $payload['packages'] = $data['packages'];
+        }
+        if (isset($data['processes']) && !empty($data['processes'])) {
+            $payload['processes'] = $data['processes'];
+        }
+        if (isset($data['configuration']) && !empty($data['configuration'])) {
+            $payload['configuration'] = $data['configuration'];
+        }
         
         $response = wp_remote_post(rtrim($api_url, '/') . '/api/intake', [
             'body' => json_encode($payload),
