@@ -1169,6 +1169,12 @@ class Simon_Integration {
             'environment' => $data['environment'],
             'extensions' => $data['extensions'],
             'themes' => $data['themes'],
+            'application_type' => 'wordpress',
+            'site' => [
+                'name' => get_bloginfo('name'),
+                'url' => get_site_url(),
+                'application_type' => 'wordpress',
+            ],
             'auth_key' => $auth_key, // Add SIMON plugin auth_key to payload
         ];
         
