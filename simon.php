@@ -1,11 +1,11 @@
 <?php
 /**
  * Plugin Name: SIMON Integration
- * Plugin URI: https://github.com/your-org/simon-wordpress
+ * Plugin URI: https://github.com/c55tech/simon-wordpress
  * Description: Integrates WordPress sites with SIMON monitoring system
- * Version: 1.0.0
- * Author: Your Name
- * Author URI: https://example.com
+ * Version: 1.0.1
+ * Author: C55Tech
+ * Author URI: https://c55tech.com
  * License: GPL v2 or later
  * Text Domain: simon
  */
@@ -16,7 +16,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('SIMON_VERSION', '1.0.0');
+define('SIMON_VERSION', '1.0.1');
 define('SIMON_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('SIMON_PLUGIN_URL', plugin_dir_url(__FILE__));
 
