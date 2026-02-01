@@ -1,0 +1,16 @@
+{
+  "name": "c55tech/simon-wordpress",
+  "description": "SiMon WordPress plugin for monitoring and intake submission.",
+  "type": "wordpress-plugin",
+  "license": "GPL-2.0-or-later",
+  "require": {
+    "composer/installers": "^1.0 || ^2.0"
+  },
+  "support": {
+    "issues": "https://github.com/c55tech/simon-wordpress/issues",
+    "source": "https://github.com/c55tech/simon-wordpress"
+  },
+  "extra": {
+    "installer-name": "simon"
+  }
+}
